@@ -22,7 +22,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kubernetes-sigs/kube-storage-version-migrator/pkg/migrator/metrics"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,6 +30,7 @@ import (
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/dynamic"
+	"sigs.k8s.io/kube-storage-version-migrator/pkg/migrator/metrics"
 )
 
 var metadataAccessor = meta.NewAccessor()
