@@ -1,6 +1,11 @@
 # See the OWNERS docs: https://git.k8s.io/community/docs/devel/owners.md
 
+reviewers:
+- p0lyn0mial
+- sttts
+- sanchezl
+- deads2k
+
 approvers:
 - deads2k
-- lavalamp
-- caesarxuchao
+- sttts
