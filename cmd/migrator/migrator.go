@@ -16,7 +16,7 @@ func main() {
 	pflag.CommandLine.AddGoFlagSet(goflag.CommandLine)
 	pflag.Parse()
 	pflag.VisitAll(func(flag *pflag.Flag) {
-		glog.V(4).Infof("FLAG: --%s=%q", flag.Name, flag.Value)
+		glog.V(2).Infof("FLAG: --%s=%q", flag.Name, flag.Value)
 	})
 	command := app.NewMigratorCommand()
 	if err := command.Execute(); err != nil {

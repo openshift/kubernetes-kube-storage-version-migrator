@@ -107,6 +107,7 @@ func (km *KubeMigrator) processOne(obj interface{}) error {
 		return nil
 	}
 	m, err = km.updateStatus(m, migrationv1alpha1.MigrationRunning, "")
+	glog.V(2).Infof("Running: %v", m.Name)
 	if err != nil {
 		return err
 	}
@@ -120,10 +121,12 @@ func (km *KubeMigrator) processOne(obj interface{}) error {
 	utilruntime.HandleError(err)
 	if err == nil {
 		_, err = km.updateStatus(m, migrationv1alpha1.MigrationSucceeded, "")
+		glog.V(2).Infof("Succeeded: %v", m.Name)
 		metrics.Metrics.ObserveSucceededMigration(resource(m).String())
 		return err
 	}
 	_, err = km.updateStatus(m, migrationv1alpha1.MigrationFailed, err.Error())
+	glog.V(2).Infof("Failed: %v", m.Name)
 	metrics.Metrics.ObserveFailedMigration(resource(m).String())
 	return err
 }
