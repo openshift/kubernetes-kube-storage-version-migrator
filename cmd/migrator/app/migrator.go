@@ -15,7 +15,6 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	migrationclient "sigs.k8s.io/kube-storage-version-migrator/pkg/clients/clientset"
 	"sigs.k8s.io/kube-storage-version-migrator/pkg/controller"
-	"sigs.k8s.io/kube-storage-version-migrator/pkg/version"
 )
 
 const (
@@ -24,8 +23,8 @@ const (
 
 var (
 	kubeconfigPath = flag.String("kubeconfig", "", "absolute path to the kubeconfig file specifying the apiserver instance. If unspecified, fallback to in-cluster configuration")
-	kubeAPIQPS     = flag.Float32("kube-api-qps", rest.DefaultQPS, "QPS to use while talking with kubernetes apiserver.")
-	kubeAPIBurst   = flag.Int("kube-api-burst", rest.DefaultBurst, "Burst to use while talking with kubernetes apiserver.")
+	kubeAPIQPS     = flag.Float32("kube-api-qps", 40.0, "QPS to use while talking with kubernetes apiserver.")
+	kubeAPIBurst   = flag.Int("kube-api-burst", 1000, "Burst to use while talking with kubernetes apiserver.")
 )
 
 func NewMigratorCommand() *cobra.Command {
@@ -64,8 +63,7 @@ func Run(ctx context.Context) error {
 	}
 	config.QPS = *kubeAPIQPS
 	config.Burst = *kubeAPIBurst
-	config.UserAgent = migratorUserAgent + "/" + version.VERSION
-	dynamic, err := dynamic.NewForConfig(config)
+	dynamic, err := dynamic.NewForConfig(rest.AddUserAgent(config, migratorUserAgent))
 	if err != nil {
 		return err
 	}
