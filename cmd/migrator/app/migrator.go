@@ -55,6 +55,8 @@ func Run(stopCh <-chan struct{}) error {
 			return err
 		}
 	}
+	config.QPS = 40.0
+	config.Burst = 1000
 	dynamic, err := dynamic.NewForConfig(rest.AddUserAgent(config, migratorUserAgent))
 	if err != nil {
 		return err
