@@ -10,3 +10,5 @@ approvers:
 - deads2k
 - sttts
 - sanchezl
+
+component: kube-storage-version-migrator
