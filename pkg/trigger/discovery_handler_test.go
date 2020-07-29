@@ -17,76 +17,245 @@ limitations under the License.
 package trigger
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"strings"
 	"testing"
 
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/discovery"
+	fakediscovery "k8s.io/client-go/discovery/fake"
 	core "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 
-	"github.com/kubernetes-sigs/kube-storage-version-migrator/pkg/apis/migration/v1alpha1"
-	"github.com/kubernetes-sigs/kube-storage-version-migrator/pkg/clients/clientset/fake"
+	"sigs.k8s.io/kube-storage-version-migrator/pkg/apis/migration/v1alpha1"
+	"sigs.k8s.io/kube-storage-version-migrator/pkg/clients/clientset/fake"
 )
 
-func staleStorageState() *v1alpha1.StorageState {
-	return &v1alpha1.StorageState{
+func TestProcessDiscoveryResource(t *testing.T) {
+	// TODO: we probably don't need a list
+	client := fake.NewSimpleClientset(newMigrationList())
+	trigger := NewMigrationTrigger(client)
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+	go trigger.migrationInformer.Run(stopCh)
+	if !cache.WaitForCacheSync(stopCh, trigger.migrationInformer.HasSynced) {
+		utilruntime.HandleError(fmt.Errorf("Unable to sync caches"))
+		return
+	}
+	trigger.heartbeat = metav1.Now()
+	discoveredResource := newAPIResource()
+	trigger.processDiscoveryResource(context.TODO(), discoveredResource)
+	actions := client.Actions()
+	verifyCleanupAndLaunch(t, actions[3:7])
+
+	c, ok := actions[8].(core.CreateAction)
+	if !ok {
+		t.Fatalf("expected create action")
+	}
+	r := schema.GroupVersionResource{Group: "migration.k8s.io", Version: "v1alpha1", Resource: "storagestates"}
+	if c.GetResource() != r {
+		t.Fatalf("unexpected resource %v", c.GetResource())
+	}
+
+	verifyStorageStateUpdate(t, actions[9], trigger.heartbeat, discoveredResource.StorageVersionHash, []string{v1alpha1.Unknown})
+}
+
+func TestProcessDiscoveryResourceStaleState(t *testing.T) {
+	client := fake.NewSimpleClientset(newMigrationList(), storageState(withStaleHeartbeat()))
+	trigger := NewMigrationTrigger(client)
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+	go trigger.migrationInformer.Run(stopCh)
+	if !cache.WaitForCacheSync(stopCh, trigger.migrationInformer.HasSynced) {
+		utilruntime.HandleError(fmt.Errorf("Unable to sync caches"))
+		return
+	}
+	trigger.heartbeat = metav1.Now()
+	discoveredResource := newAPIResource()
+	trigger.processDiscoveryResource(context.TODO(), discoveredResource)
+
+	actions := client.Actions()
+	d, ok := actions[3].(core.DeleteAction)
+	if !ok {
+		t.Fatalf("expected delete action")
+	}
+	r := schema.GroupVersionResource{Group: "migration.k8s.io", Version: "v1alpha1", Resource: "storagestates"}
+	if d.GetResource() != r {
+		t.Fatalf("unexpected resource %v", d.GetResource())
+	}
+	if !strings.Contains(d.GetName(), "pods") {
+		t.Fatalf("unexpected name %s", d.GetName())
+	}
+
+	verifyCleanupAndLaunch(t, actions[4:8])
+
+	c, ok := actions[9].(core.CreateAction)
+	if !ok {
+		t.Fatalf("expected create action")
+	}
+	r = schema.GroupVersionResource{Group: "migration.k8s.io", Version: "v1alpha1", Resource: "storagestates"}
+	if c.GetResource() != r {
+		t.Fatalf("unexpected resource %v", c.GetResource())
+	}
+
+	verifyStorageStateUpdate(t, actions[10], trigger.heartbeat, discoveredResource.StorageVersionHash, []string{v1alpha1.Unknown})
+}
+
+func TestProcessDiscoveryResourceStorageVersionChanged(t *testing.T) {
+	client := fake.NewSimpleClientset(
+		newMigrationList(),
+		storageState(
+			withFreshHeartbeat(),
+			withCurrentVersion("oldhash"),
+			withPersistedVersions("oldhash"),
+		),
+	)
+	trigger := NewMigrationTrigger(client)
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+	go trigger.migrationInformer.Run(stopCh)
+	if !cache.WaitForCacheSync(stopCh, trigger.migrationInformer.HasSynced) {
+		utilruntime.HandleError(fmt.Errorf("Unable to sync caches"))
+		return
+	}
+	trigger.heartbeat = metav1.Now()
+	discoveredResource := newAPIResource()
+	trigger.processDiscoveryResource(context.TODO(), discoveredResource)
+
+	actions := client.Actions()
+	verifyCleanupAndLaunch(t, actions[3:7])
+	verifyStorageStateUpdate(t, actions[8], trigger.heartbeat, discoveredResource.StorageVersionHash, []string{"oldhash", "newhash"})
+}
+
+func TestProcessDiscoveryResourceNoChange(t *testing.T) {
+	client := fake.NewSimpleClientset(
+		newMigrationList(),
+		storageState(
+			withFreshHeartbeat(),
+			withCurrentVersion("newhash"),
+			withPersistedVersions("newhash"),
+		),
+	)
+	trigger := NewMigrationTrigger(client)
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+	go trigger.migrationInformer.Run(stopCh)
+	if !cache.WaitForCacheSync(stopCh, trigger.migrationInformer.HasSynced) {
+		utilruntime.HandleError(fmt.Errorf("Unable to sync caches"))
+		return
+	}
+	trigger.heartbeat = metav1.Now()
+	discoveredResource := newAPIResource()
+	trigger.processDiscoveryResource(context.TODO(), discoveredResource)
+
+	actions := client.Actions()
+	verifyStorageStateUpdate(t, actions[4], trigger.heartbeat, discoveredResource.StorageVersionHash, []string{"newhash"})
+}
+
+func TestProcessDiscoveryResourceStorageMigrationMissing(t *testing.T) {
+	client := fake.NewSimpleClientset(
+		storageState(
+			withFreshHeartbeat(),
+			withCurrentVersion("newhash"),
+			withPersistedVersions(v1alpha1.Unknown),
+		),
+	)
+	trigger := NewMigrationTrigger(client)
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+	go trigger.migrationInformer.Run(stopCh)
+	if !cache.WaitForCacheSync(stopCh, trigger.migrationInformer.HasSynced) {
+		utilruntime.HandleError(fmt.Errorf("Unable to sync caches"))
+		return
+	}
+	trigger.heartbeat = metav1.Now()
+	discoveredResource := newAPIResource()
+	trigger.processDiscoveryResource(context.Background(), discoveredResource)
+
+	actions := client.Actions()
+	expectCreateStorageVersionMigrationAction(t, actions[3])
+	verifyStorageStateUpdate(t, actions[len(actions)-1], trigger.heartbeat, discoveredResource.StorageVersionHash, []string{v1alpha1.Unknown})
+}
+
+func TestProcessDiscoveryResourceStorageMigrationFailed(t *testing.T) {
+	client := fake.NewSimpleClientset(
+		storageMigration(withFailedCondition()),
+		storageState(
+			withFreshHeartbeat(),
+			withCurrentVersion("newhash"),
+			withPersistedVersions(v1alpha1.Unknown),
+		),
+	)
+	trigger := NewMigrationTrigger(client)
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+	go trigger.migrationInformer.Run(stopCh)
+	if !cache.WaitForCacheSync(stopCh, trigger.migrationInformer.HasSynced) {
+		utilruntime.HandleError(fmt.Errorf("Unable to sync caches"))
+		return
+	}
+	trigger.heartbeat = metav1.Now()
+	discoveredResource := newAPIResource()
+	trigger.processDiscoveryResource(context.Background(), discoveredResource)
+	actions := client.Actions()
+	expectCreateStorageVersionMigrationAction(t, actions[4])
+	verifyStorageStateUpdate(t, actions[len(actions)-1], trigger.heartbeat, discoveredResource.StorageVersionHash, []string{v1alpha1.Unknown})
+}
+
+func storageState(options ...func(*v1alpha1.StorageState)) *v1alpha1.StorageState {
+	ss := &v1alpha1.StorageState{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: storageStateName(v1alpha1.GroupVersionResource{Resource: "pods"}),
 		},
 		Spec: v1alpha1.StorageStateSpec{
 			Resource: v1alpha1.GroupResource{Resource: "pods"},
 		},
-		Status: v1alpha1.StorageStateStatus{
-			LastHeartbeatTime: metav1.Time{Time: metav1.Now().Add(-3 * discoveryPeriod)},
-		},
+	}
+	for _, fn := range options {
+		fn(ss)
+	}
+	return ss
+}
+
+func withFreshHeartbeat() func(*v1alpha1.StorageState) {
+	return func(ss *v1alpha1.StorageState) {
+		ss.Status.LastHeartbeatTime = metav1.NewTime(metav1.Now().Add(-1 * discoveryPeriod))
 	}
 }
 
-func freshStorageState() *v1alpha1.StorageState {
-	return &v1alpha1.StorageState{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: storageStateName(v1alpha1.GroupVersionResource{Resource: "pods"}),
-		},
-		Spec: v1alpha1.StorageStateSpec{
-			Resource: v1alpha1.GroupResource{Resource: "pods"},
-		},
-		Status: v1alpha1.StorageStateStatus{
-			CurrentStorageVersionHash:     "newhash",
-			PersistedStorageVersionHashes: []string{"newhash"},
-			LastHeartbeatTime:             metav1.Time{Time: metav1.Now().Add(-1 * discoveryPeriod)},
-		},
+func withStaleHeartbeat() func(*v1alpha1.StorageState) {
+	return func(ss *v1alpha1.StorageState) {
+		ss.Status.LastHeartbeatTime = metav1.NewTime(metav1.Now().Add(-3 * discoveryPeriod))
 	}
 }
 
-func freshStorageStateWithOldHash() *v1alpha1.StorageState {
-	return &v1alpha1.StorageState{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: storageStateName(v1alpha1.GroupVersionResource{Resource: "pods"}),
-		},
-		Spec: v1alpha1.StorageStateSpec{
-			Resource: v1alpha1.GroupResource{Resource: "pods"},
-		},
-		Status: v1alpha1.StorageStateStatus{
-			CurrentStorageVersionHash:     "oldhash",
-			PersistedStorageVersionHashes: []string{"oldhash"},
-			LastHeartbeatTime:             metav1.Time{Time: metav1.Now().Add(-1 * discoveryPeriod)},
-		},
+func withCurrentVersion(version string) func(*v1alpha1.StorageState) {
+	return func(ss *v1alpha1.StorageState) {
+		ss.Status.CurrentStorageVersionHash = version
+	}
+}
+
+func withPersistedVersions(versions ...string) func(*v1alpha1.StorageState) {
+	return func(ss *v1alpha1.StorageState) {
+		ss.Status.PersistedStorageVersionHashes = append(ss.Status.PersistedStorageVersionHashes, versions...)
 	}
 }
 
 func newMigrationList() *v1alpha1.StorageVersionMigrationList {
 	var migrations []v1alpha1.StorageVersionMigration
 	for i := 0; i < 3; i++ {
-		migration := newMigration(fmt.Sprintf("migration%d", i), v1alpha1.GroupVersionResource{Version: "v1", Resource: "pods"})
-		migrations = append(migrations, migration)
+		migration := storageMigration(withName(fmt.Sprintf("migration%d", i)))
+		migrations = append(migrations, *migration)
 	}
 	for i := 3; i < 6; i++ {
-		migration := newMigration(fmt.Sprintf("migration%d", i), v1alpha1.GroupVersionResource{Group: "apps", Version: "v1", Resource: "statefulsets"})
-		migrations = append(migrations, migration)
+		migration := storageMigration(withName(fmt.Sprintf("migration%d", i)), withResource(v1alpha1.GroupVersionResource{Group: "apps", Version: "v1", Resource: "statefulsets"}))
+		migrations = append(migrations, *migration)
 	}
 	return &v1alpha1.StorageVersionMigrationList{
 		TypeMeta: metav1.TypeMeta{
@@ -97,14 +266,39 @@ func newMigrationList() *v1alpha1.StorageVersionMigrationList {
 	}
 }
 
-func newMigration(name string, r v1alpha1.GroupVersionResource) v1alpha1.StorageVersionMigration {
-	return v1alpha1.StorageVersionMigration{
+func storageMigration(options ...func(*v1alpha1.StorageVersionMigration)) *v1alpha1.StorageVersionMigration {
+	m := &v1alpha1.StorageVersionMigration{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
+			Name: "pods",
 		},
 		Spec: v1alpha1.StorageVersionMigrationSpec{
-			Resource: r,
+			Resource: v1alpha1.GroupVersionResource{Version: "v1", Resource: "pods"},
 		},
+	}
+	for _, option := range options {
+		option(m)
+	}
+	return m
+}
+
+func withName(name string) func(*v1alpha1.StorageVersionMigration) {
+	return func(migration *v1alpha1.StorageVersionMigration) {
+		migration.Name = name
+	}
+}
+
+func withResource(resource v1alpha1.GroupVersionResource) func(*v1alpha1.StorageVersionMigration) {
+	return func(migration *v1alpha1.StorageVersionMigration) {
+		migration.Spec.Resource = resource
+	}
+}
+
+func withFailedCondition() func(*v1alpha1.StorageVersionMigration) {
+	return func(migration *v1alpha1.StorageVersionMigration) {
+		migration.Status.Conditions = append(migration.Status.Conditions, v1alpha1.MigrationCondition{
+			Type:   v1alpha1.MigrationFailed,
+			Status: v1.ConditionTrue,
+		})
 	}
 }
 
@@ -136,14 +330,22 @@ func verifyCleanupAndLaunch(t *testing.T, actions []core.Action) {
 			t.Fatalf("unexpected name %s", d.GetName())
 		}
 	}
-	c, ok := actions[3].(core.CreateAction)
+	expectCreateStorageVersionMigrationAction(t, actions[3])
+}
+
+func expectCreateStorageVersionMigrationAction(t *testing.T, action core.Action) *v1alpha1.StorageVersionMigration {
+	return expectCreateAction(t, action, schema.GroupVersionResource{Group: "migration.k8s.io", Version: "v1alpha1", Resource: "storageversionmigrations"}).(*v1alpha1.StorageVersionMigration)
+}
+
+func expectCreateAction(t *testing.T, action core.Action, gvr schema.GroupVersionResource) runtime.Object {
+	c, ok := action.(core.CreateAction)
 	if !ok {
 		t.Fatalf("expected create action")
 	}
-	r := schema.GroupVersionResource{Group: "migration.k8s.io", Version: "v1alpha1", Resource: "storageversionmigrations"}
-	if c.GetResource() != r {
+	if c.GetResource() != gvr {
 		t.Fatalf("unexpected resource %v", c.GetResource())
 	}
+	return c.GetObject()
 }
 
 func verifyStorageStateUpdate(t *testing.T, a core.Action, expectedHeartbeat metav1.Time, expectedCurrentHash string, expectedPersistedHashes []string) {
@@ -166,17 +368,43 @@ func verifyStorageStateUpdate(t *testing.T, a core.Action, expectedHeartbeat met
 		t.Fatalf("expected to update heartbeat, got %v", e)
 	}
 	if a, e := ss.Status.CurrentStorageVersionHash, expectedCurrentHash; a != e {
-		t.Fatalf("expected to has hash %v, got %v", e, a)
+		t.Fatalf("expected hash %v, got %v", e, a)
 	}
 	if a, e := ss.Status.PersistedStorageVersionHashes, expectedPersistedHashes; !reflect.DeepEqual(a, e) {
-		t.Fatalf("expected to has hashes %v, got %v", e, a)
+		t.Fatalf("expected hashes %v, got %v", e, a)
 	}
 }
 
-func TestProcessDiscoveryResource(t *testing.T) {
-	// TODO: we probably don't need a list
+// FakeClientset wraps the generated fake Clientset and overrides the Discovery interface
+type FakeClientset struct {
+	*fake.Clientset
+}
+
+func (f *FakeClientset) Discovery() discovery.DiscoveryInterface {
+	return &FakeDiscovery{FakeDiscovery: f.Clientset.Discovery().(*fakediscovery.FakeDiscovery)}
+}
+
+// FakeDiscovery wraps the client-go FakeDiscovery and overrides the ServerPreferredResources method
+type FakeDiscovery struct {
+	*fakediscovery.FakeDiscovery
+}
+
+func (f *FakeDiscovery) ServerPreferredResources() ([]*metav1.APIResourceList, error) {
+	failedGroups := make(map[schema.GroupVersion]error)
+	gv := schema.GroupVersion{Group: "test.k8s.io", Version: "v1"}
+	failedGroups[gv] = fmt.Errorf("test partial discovery failure")
+	return []*metav1.APIResourceList{
+		{
+			APIResources: []metav1.APIResource{newAPIResource()},
+		},
+	}, &discovery.ErrGroupDiscoveryFailed{Groups: failedGroups}
+
+}
+
+func TestProcessDiscoveryPartialFailure(t *testing.T) {
 	client := fake.NewSimpleClientset(newMigrationList())
-	trigger := NewMigrationTrigger(client)
+	// overrides the ServerPreferredResources method of the simple clientset
+	trigger := NewMigrationTrigger(&FakeClientset{Clientset: client})
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 	go trigger.migrationInformer.Run(stopCh)
@@ -185,8 +413,9 @@ func TestProcessDiscoveryResource(t *testing.T) {
 		return
 	}
 	trigger.heartbeat = metav1.Now()
-	discoveredResource := newAPIResource()
-	trigger.processDiscoveryResource(discoveredResource)
+	// let trigger controller invokes ServerPreferredResources method to discover
+	// the API resources
+	trigger.processDiscovery(context.TODO())
 	actions := client.Actions()
 	verifyCleanupAndLaunch(t, actions[3:7])
 
@@ -199,83 +428,5 @@ func TestProcessDiscoveryResource(t *testing.T) {
 		t.Fatalf("unexpected resource %v", c.GetResource())
 	}
 
-	verifyStorageStateUpdate(t, actions[9], trigger.heartbeat, discoveredResource.StorageVersionHash, []string{v1alpha1.Unknown})
-}
-
-func TestProcessDiscoveryResourceStaleState(t *testing.T) {
-	client := fake.NewSimpleClientset(newMigrationList(), staleStorageState())
-	trigger := NewMigrationTrigger(client)
-	stopCh := make(chan struct{})
-	defer close(stopCh)
-	go trigger.migrationInformer.Run(stopCh)
-	if !cache.WaitForCacheSync(stopCh, trigger.migrationInformer.HasSynced) {
-		utilruntime.HandleError(fmt.Errorf("Unable to sync caches"))
-		return
-	}
-	trigger.heartbeat = metav1.Now()
-	discoveredResource := newAPIResource()
-	trigger.processDiscoveryResource(discoveredResource)
-
-	actions := client.Actions()
-	d, ok := actions[3].(core.DeleteAction)
-	if !ok {
-		t.Fatalf("expected delete action")
-	}
-	r := schema.GroupVersionResource{Group: "migration.k8s.io", Version: "v1alpha1", Resource: "storagestates"}
-	if d.GetResource() != r {
-		t.Fatalf("unexpected resource %v", d.GetResource())
-	}
-	if !strings.Contains(d.GetName(), staleStorageState().Name) {
-		t.Fatalf("unexpected name %s", d.GetName())
-	}
-
-	verifyCleanupAndLaunch(t, actions[4:8])
-
-	c, ok := actions[9].(core.CreateAction)
-	if !ok {
-		t.Fatalf("expected create action")
-	}
-	r = schema.GroupVersionResource{Group: "migration.k8s.io", Version: "v1alpha1", Resource: "storagestates"}
-	if c.GetResource() != r {
-		t.Fatalf("unexpected resource %v", c.GetResource())
-	}
-
-	verifyStorageStateUpdate(t, actions[10], trigger.heartbeat, discoveredResource.StorageVersionHash, []string{v1alpha1.Unknown})
-}
-
-func TestProcessDiscoveryResourceStorageVersionChanged(t *testing.T) {
-	client := fake.NewSimpleClientset(newMigrationList(), freshStorageStateWithOldHash())
-	trigger := NewMigrationTrigger(client)
-	stopCh := make(chan struct{})
-	defer close(stopCh)
-	go trigger.migrationInformer.Run(stopCh)
-	if !cache.WaitForCacheSync(stopCh, trigger.migrationInformer.HasSynced) {
-		utilruntime.HandleError(fmt.Errorf("Unable to sync caches"))
-		return
-	}
-	trigger.heartbeat = metav1.Now()
-	discoveredResource := newAPIResource()
-	trigger.processDiscoveryResource(discoveredResource)
-
-	actions := client.Actions()
-	verifyCleanupAndLaunch(t, actions[3:7])
-	verifyStorageStateUpdate(t, actions[8], trigger.heartbeat, discoveredResource.StorageVersionHash, []string{"oldhash", "newhash"})
-}
-
-func TestProcessDiscoveryResourceNoChange(t *testing.T) {
-	client := fake.NewSimpleClientset(newMigrationList(), freshStorageState())
-	trigger := NewMigrationTrigger(client)
-	stopCh := make(chan struct{})
-	defer close(stopCh)
-	go trigger.migrationInformer.Run(stopCh)
-	if !cache.WaitForCacheSync(stopCh, trigger.migrationInformer.HasSynced) {
-		utilruntime.HandleError(fmt.Errorf("Unable to sync caches"))
-		return
-	}
-	trigger.heartbeat = metav1.Now()
-	discoveredResource := newAPIResource()
-	trigger.processDiscoveryResource(discoveredResource)
-
-	actions := client.Actions()
-	verifyStorageStateUpdate(t, actions[4], trigger.heartbeat, discoveredResource.StorageVersionHash, []string{"newhash"})
+	verifyStorageStateUpdate(t, actions[9], trigger.heartbeat, newAPIResource().StorageVersionHash, []string{v1alpha1.Unknown})
 }

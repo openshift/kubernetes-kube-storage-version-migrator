@@ -20,11 +20,11 @@ import (
 	"reflect"
 	"testing"
 
-	migrationv1alpha1 "github.com/kubernetes-sigs/kube-storage-version-migrator/pkg/apis/migration/v1alpha1"
-	"github.com/kubernetes-sigs/kube-storage-version-migrator/pkg/clients/clientset/fake"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
+	migrationv1alpha1 "sigs.k8s.io/kube-storage-version-migrator/pkg/apis/migration/v1alpha1"
+	"sigs.k8s.io/kube-storage-version-migrator/pkg/clients/clientset/fake"
 )
 
 func newMigration(name string, conditionType migrationv1alpha1.MigrationConditionType) *migrationv1alpha1.StorageVersionMigration {
@@ -125,7 +125,7 @@ func TestResourceIndexedInformer(t *testing.T) {
 	}
 	switch {
 	case reflect.DeepEqual(ret[0], podsv1) && reflect.DeepEqual(ret[1], podsv2):
-	case reflect.DeepEqual(ret[1], podsv2) && reflect.DeepEqual(ret[0], podsv1):
+	case reflect.DeepEqual(ret[0], podsv2) && reflect.DeepEqual(ret[1], podsv1):
 	default:
 		t.Errorf("expected either [podsv1, podsv2] or [podsv2, podsv1], got %v", ret)
 	}

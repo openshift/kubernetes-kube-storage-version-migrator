@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
@@ -8,10 +9,6 @@ import (
 	"sync"
 	"time"
 
-	migrationv1alpha1 "github.com/kubernetes-sigs/kube-storage-version-migrator/pkg/apis/migration/v1alpha1"
-	migrationclient "github.com/kubernetes-sigs/kube-storage-version-migrator/pkg/clients/clientset"
-	"github.com/kubernetes-sigs/kube-storage-version-migrator/test/e2e/chaosmonkey"
-	"github.com/kubernetes-sigs/kube-storage-version-migrator/test/e2e/util"
 	. "github.com/onsi/ginkgo"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -21,8 +18,12 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	migrationv1alpha1 "sigs.k8s.io/kube-storage-version-migrator/pkg/apis/migration/v1alpha1"
+	migrationclient "sigs.k8s.io/kube-storage-version-migrator/pkg/clients/clientset"
+	"sigs.k8s.io/kube-storage-version-migrator/pkg/version"
+	"sigs.k8s.io/kube-storage-version-migrator/test/e2e/chaosmonkey"
+	"sigs.k8s.io/kube-storage-version-migrator/test/e2e/util"
 )
 
 const (
@@ -48,11 +49,12 @@ type StorageMigratorChaosTest struct {
 }
 
 func (t *StorageMigratorChaosTest) crCreation() {
-	_, err := t.kubeClient.CoreV1().Namespaces().Create(&v1.Namespace{
+	ctx := context.TODO()
+	_, err := t.kubeClient.CoreV1().Namespaces().Create(ctx, &v1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: namespace,
 		},
-	})
+	}, metav1.CreateOptions{})
 	if err != nil {
 		util.Failf("failed to create namespace: %v", err)
 	}
@@ -71,7 +73,7 @@ func (t *StorageMigratorChaosTest) crCreation() {
 				},
 			},
 		}
-		_, err := t.crClient.Create(crInstance, metav1.CreateOptions{})
+		_, err := t.crClient.Create(ctx, crInstance, metav1.CreateOptions{})
 		if err != nil {
 			util.Failf("failed to create CR: %v", err)
 		}
@@ -83,7 +85,7 @@ func (t *StorageMigratorChaosTest) setupClients() {
 	if err != nil {
 		util.Failf("can't build client config: %v", err)
 	}
-	cfg = rest.AddUserAgent(cfg, "e2e test")
+	cfg.UserAgent = "storage-migration-chaos-test/" + version.VERSION
 	t.migrationClient, err = migrationclient.NewForConfig(cfg)
 	if err != nil {
 		util.Failf("can't build migration client: %v", err)
@@ -101,6 +103,7 @@ func (t *StorageMigratorChaosTest) setupClients() {
 }
 
 func (t *StorageMigratorChaosTest) Setup() {
+	ctx := context.TODO()
 	setupMigrator()
 	t.setupClients()
 
@@ -128,7 +131,7 @@ func (t *StorageMigratorChaosTest) Setup() {
 	var crdStorageState *migrationv1alpha1.StorageState
 	err = wait.PollImmediate(10*time.Second, 1*time.Minute, func() (bool, error) {
 		var err error
-		crdStorageState, err = t.migrationClient.MigrationV1alpha1().StorageStates().Get("tests.migrationtest.k8s.io", metav1.GetOptions{})
+		crdStorageState, err = t.migrationClient.MigrationV1alpha1().StorageStates().Get(ctx, "tests.migrationtest.k8s.io", metav1.GetOptions{})
 		if err != nil && !errors.IsNotFound(err) {
 			util.Failf("%v", err)
 		}
@@ -169,12 +172,13 @@ func (t *StorageMigratorChaosTest) Setup() {
 }
 
 func (t *StorageMigratorChaosTest) Test(done <-chan struct{}) {
+	ctx := context.TODO()
 	// Block until disruptions is done
 	<-done
 	By("Wait for the apiserver to come back")
 	err := wait.PollImmediate(10*time.Second, 5*time.Minute, func() (bool, error) {
 		healthStatus := 0
-		t.migrationClient.Discovery().RESTClient().Get().AbsPath("/healthz").Do().StatusCode(&healthStatus)
+		t.migrationClient.Discovery().RESTClient().Get().AbsPath("/healthz").Do(ctx).StatusCode(&healthStatus)
 		if healthStatus != http.StatusOK {
 			return false, nil
 		}
@@ -191,7 +195,7 @@ func (t *StorageMigratorChaosTest) Test(done <-chan struct{}) {
 
 	// Wait for discoveryPeriod + 1 minute to give the triggering controller enough time to detect and react.
 	err = wait.PollImmediate(10*time.Second, discoveryPeriod+1*time.Minute, func() (bool, error) {
-		crdStorageState, err := t.migrationClient.MigrationV1alpha1().StorageStates().Get("tests.migrationtest.k8s.io", metav1.GetOptions{})
+		crdStorageState, err := t.migrationClient.MigrationV1alpha1().StorageStates().Get(ctx, "tests.migrationtest.k8s.io", metav1.GetOptions{})
 		if err != nil {
 			util.Failf("%v", err)
 		}
@@ -206,7 +210,7 @@ func (t *StorageMigratorChaosTest) Test(done <-chan struct{}) {
 
 	By("Wait for all storage states to converge")
 	err = wait.PollImmediate(30*time.Second, 10*time.Minute, func() (bool, error) {
-		l, err := t.migrationClient.MigrationV1alpha1().StorageStates().List(metav1.ListOptions{})
+		l, err := t.migrationClient.MigrationV1alpha1().StorageStates().List(ctx, metav1.ListOptions{})
 		if err != nil {
 			util.Failf("%v", err)
 		}
@@ -227,7 +231,7 @@ func (t *StorageMigratorChaosTest) Test(done <-chan struct{}) {
 	}
 
 	By("Migrations should have all completed")
-	l, err := t.migrationClient.MigrationV1alpha1().StorageVersionMigrations().List(metav1.ListOptions{})
+	l, err := t.migrationClient.MigrationV1alpha1().StorageVersionMigrations().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		util.Failf("%v", err)
 	}

@@ -19,16 +19,17 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"context"
 	time "time"
 
-	migrationv1alpha1 "github.com/kubernetes-sigs/kube-storage-version-migrator/pkg/apis/migration/v1alpha1"
-	clientset "github.com/kubernetes-sigs/kube-storage-version-migrator/pkg/clients/clientset"
-	internalinterfaces "github.com/kubernetes-sigs/kube-storage-version-migrator/pkg/clients/informer/internalinterfaces"
-	v1alpha1 "github.com/kubernetes-sigs/kube-storage-version-migrator/pkg/clients/lister/migration/v1alpha1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	watch "k8s.io/apimachinery/pkg/watch"
 	cache "k8s.io/client-go/tools/cache"
+	migrationv1alpha1 "sigs.k8s.io/kube-storage-version-migrator/pkg/apis/migration/v1alpha1"
+	clientset "sigs.k8s.io/kube-storage-version-migrator/pkg/clients/clientset"
+	internalinterfaces "sigs.k8s.io/kube-storage-version-migrator/pkg/clients/informer/internalinterfaces"
+	v1alpha1 "sigs.k8s.io/kube-storage-version-migrator/pkg/clients/lister/migration/v1alpha1"
 )
 
 // StorageStateInformer provides access to a shared informer and lister for
@@ -60,13 +61,13 @@ func NewFilteredStorageStateInformer(client clientset.Interface, resyncPeriod ti
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.MigrationV1alpha1().StorageStates().List(options)
+				return client.MigrationV1alpha1().StorageStates().List(context.TODO(), options)
 			},
 			WatchFunc: func(options v1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.MigrationV1alpha1().StorageStates().Watch(options)
+				return client.MigrationV1alpha1().StorageStates().Watch(context.TODO(), options)
 			},
 		},
 		&migrationv1alpha1.StorageState{},

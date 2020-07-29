@@ -17,18 +17,19 @@ limitations under the License.
 package trigger
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"time"
 
-	migrationv1alpha1 "github.com/kubernetes-sigs/kube-storage-version-migrator/pkg/apis/migration/v1alpha1"
-	migrationclient "github.com/kubernetes-sigs/kube-storage-version-migrator/pkg/clients/clientset"
-	"github.com/kubernetes-sigs/kube-storage-version-migrator/pkg/controller"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
+	migrationv1alpha1 "sigs.k8s.io/kube-storage-version-migrator/pkg/apis/migration/v1alpha1"
+	migrationclient "sigs.k8s.io/kube-storage-version-migrator/pkg/clients/clientset"
+	"sigs.k8s.io/kube-storage-version-migrator/pkg/controller"
 )
 
 var (
@@ -132,10 +133,10 @@ func (mt *MigrationTrigger) enqueueResource(migration *migrationv1alpha1.Storage
 	mt.queue.Add(it)
 }
 
-func (mt *MigrationTrigger) Run(stopCh <-chan struct{}) {
+func (mt *MigrationTrigger) Run(ctx context.Context) {
 	defer utilruntime.HandleCrash()
-	go mt.migrationInformer.Run(stopCh)
-	if !cache.WaitForCacheSync(stopCh, mt.migrationInformer.HasSynced) {
+	go mt.migrationInformer.Run(ctx.Done())
+	if !cache.WaitForCacheSync(ctx.Done(), mt.migrationInformer.HasSynced) {
 		utilruntime.HandleError(fmt.Errorf("Unable to sync caches"))
 		return
 	}
@@ -165,21 +166,21 @@ func (mt *MigrationTrigger) Run(stopCh <-chan struct{}) {
 	// we can avoid the race.
 	ticker := time.NewTicker(discoveryPeriod)
 	// Do a discovery once started.
-	mt.processDiscovery()
+	mt.processDiscovery(ctx)
 	for {
 		select {
 		case <-ticker.C:
-			mt.processDiscovery()
+			mt.processDiscovery(ctx)
 		case w := <-work:
 			defer mt.queue.Done(w)
-			err := mt.processQueue(w)
+			err := mt.processQueue(ctx, w)
 			if err == nil {
 				mt.queue.Forget(w)
 				break
 			}
 			utilruntime.HandleError(fmt.Errorf("failed to process %v: %v", w, err))
 			mt.queue.AddRateLimited(w)
-		case <-stopCh:
+		case <-ctx.Done():
 			return
 		}
 	}

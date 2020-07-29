@@ -4,7 +4,7 @@ all: build
 GO_BUILD_PACKAGES :=./cmd/migrator
 GO_TEST_PACKAGES :=./pkg/...
 
-include $(addprefix ./vendor/github.com/openshift/library-go/alpha-build-machinery/make/, \
+include $(addprefix ./vendor/github.com/openshift/build-machinery-go/make/, \
 	golang.mk \
 	targets/openshift/images.mk \
 )

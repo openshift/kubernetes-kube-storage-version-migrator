@@ -1,20 +1,20 @@
 package app
 
 import (
-	"flag"
+	"context"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 
-	migrationclient "github.com/kubernetes-sigs/kube-storage-version-migrator/pkg/clients/clientset"
-	"github.com/kubernetes-sigs/kube-storage-version-migrator/pkg/controller"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
-	"k8s.io/apimachinery/pkg/util/wait"
+	flag "github.com/spf13/pflag"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	migrationclient "sigs.k8s.io/kube-storage-version-migrator/pkg/clients/clientset"
+	"sigs.k8s.io/kube-storage-version-migrator/pkg/controller"
 )
 
 const (
@@ -23,6 +23,8 @@ const (
 
 var (
 	kubeconfigPath = flag.String("kubeconfig", "", "absolute path to the kubeconfig file specifying the apiserver instance. If unspecified, fallback to in-cluster configuration")
+	kubeAPIQPS     = flag.Float32("kube-api-qps", 40.0, "QPS to use while talking with kubernetes apiserver.")
+	kubeAPIBurst   = flag.Int("kube-api-burst", 1000, "Burst to use while talking with kubernetes apiserver.")
 )
 
 func NewMigratorCommand() *cobra.Command {
@@ -30,7 +32,7 @@ func NewMigratorCommand() *cobra.Command {
 		Use:  "kube-storage-migrator",
 		Long: `The Kubernetes storage migrator migrates resources based on the StorageVersionMigrations APIs.`,
 		Run: func(cmd *cobra.Command, args []string) {
-			if err := Run(wait.NeverStop); err != nil {
+			if err := Run(context.TODO()); err != nil {
 				fmt.Fprintf(os.Stderr, "%v\n", err)
 				os.Exit(1)
 			}
@@ -38,7 +40,7 @@ func NewMigratorCommand() *cobra.Command {
 	}
 }
 
-func Run(stopCh <-chan struct{}) error {
+func Run(ctx context.Context) error {
 	http.Handle("/metrics", promhttp.Handler())
 	go func() { http.ListenAndServe(":2112", nil) }()
 
@@ -55,8 +57,8 @@ func Run(stopCh <-chan struct{}) error {
 			return err
 		}
 	}
-	config.QPS = 40.0
-	config.Burst = 1000
+	config.QPS = *kubeAPIQPS
+	config.Burst = *kubeAPIBurst
 	dynamic, err := dynamic.NewForConfig(rest.AddUserAgent(config, migratorUserAgent))
 	if err != nil {
 		return err
@@ -69,6 +71,6 @@ func Run(stopCh <-chan struct{}) error {
 		dynamic,
 		migration,
 	)
-	c.Run(stopCh)
+	c.Run(ctx)
 	panic("unreachable")
 }

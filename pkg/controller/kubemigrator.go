@@ -17,22 +17,22 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"time"
 
-	"k8s.io/klog/glog"
-
-	migrationv1alpha1 "github.com/kubernetes-sigs/kube-storage-version-migrator/pkg/apis/migration/v1alpha1"
-	migrationclient "github.com/kubernetes-sigs/kube-storage-version-migrator/pkg/clients/clientset"
-	"github.com/kubernetes-sigs/kube-storage-version-migrator/pkg/migrator"
-	"github.com/kubernetes-sigs/kube-storage-version-migrator/pkg/migrator/metrics"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/klog"
+	migrationv1alpha1 "sigs.k8s.io/kube-storage-version-migrator/pkg/apis/migration/v1alpha1"
+	migrationclient "sigs.k8s.io/kube-storage-version-migrator/pkg/clients/clientset"
+	"sigs.k8s.io/kube-storage-version-migrator/pkg/migrator"
+	"sigs.k8s.io/kube-storage-version-migrator/pkg/migrator/metrics"
 )
 
 // KubeMigrator monitors storageVersionMigraiton objects, fulfills the
@@ -53,17 +53,17 @@ func NewKubeMigrator(dynamic dynamic.Interface, migrationClient migrationclient.
 	}
 }
 
-func (km *KubeMigrator) Run(stopCh <-chan struct{}) {
+func (km *KubeMigrator) Run(ctx context.Context) {
 	defer utilruntime.HandleCrash()
-	go km.migrationInformer.Run(stopCh)
-	if !cache.WaitForCacheSync(stopCh, km.migrationInformer.HasSynced) {
+	go km.migrationInformer.Run(ctx.Done())
+	if !cache.WaitForCacheSync(ctx.Done(), km.migrationInformer.HasSynced) {
 		utilruntime.HandleError(fmt.Errorf("Unable to sync caches"))
 		return
 	}
-	wait.Until(km.process, time.Second, stopCh)
+	wait.UntilWithContext(ctx, km.process, time.Second)
 }
 
-func (km *KubeMigrator) process() {
+func (km *KubeMigrator) process(ctx context.Context) {
 	// KubeMigrator has only one worker, so it doesn't need to use a
 	// workqueue to ensure only there is a single thread processing a
 	// storageVersionMigration.
@@ -75,7 +75,7 @@ func (km *KubeMigrator) process() {
 		return
 	}
 	if len(runnings) != 0 {
-		utilruntime.HandleError(km.processOne(runnings[0]))
+		utilruntime.HandleError(km.processOne(ctx, runnings[0]))
 		return
 	}
 
@@ -86,27 +86,28 @@ func (km *KubeMigrator) process() {
 		return
 	}
 	if len(pendings) != 0 {
-		utilruntime.HandleError(km.processOne(pendings[0]))
+		utilruntime.HandleError(km.processOne(ctx, pendings[0]))
 		return
 	}
 }
 
-func (km *KubeMigrator) processOne(obj interface{}) error {
+func (km *KubeMigrator) processOne(ctx context.Context, obj interface{}) error {
 	m, ok := obj.(*migrationv1alpha1.StorageVersionMigration)
 	if !ok {
 		return fmt.Errorf("expected StorageVersionMigration, got %#v", reflect.TypeOf(obj))
 	}
 	// get the fresh object from the apiserver to make sure the object
 	// still exists, and the object is not completed.
-	m, err := km.migrationClient.MigrationV1alpha1().StorageVersionMigrations().Get(m.Name, metav1.GetOptions{})
+	m, err := km.migrationClient.MigrationV1alpha1().StorageVersionMigrations().Get(ctx, m.Name, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
 	if HasCondition(m, migrationv1alpha1.MigrationSucceeded) || HasCondition(m, migrationv1alpha1.MigrationFailed) {
-		glog.V(2).Infof("The migration has already completed for %#v", m)
+		klog.V(2).Infof("%v: migration has already completed", m.Name)
 		return nil
 	}
-	m, err = km.updateStatus(m, migrationv1alpha1.MigrationRunning, "")
+	m, err = km.updateStatus(ctx, m, migrationv1alpha1.MigrationRunning, "")
+	klog.V(2).Infof("%v: migration running", m.Name)
 	if err != nil {
 		return err
 	}
@@ -116,14 +117,20 @@ func (km *KubeMigrator) processOne(obj interface{}) error {
 	// will return an error when it tries to write the continueToken into the
 	// migration object. Thus, it's not necessary to register a deletion
 	// event handler with the migrationInformer to interrupt the Run().
-	err = core.Run()
+	err = core.Run(ctx)
 	utilruntime.HandleError(err)
 	if err == nil {
-		_, err = km.updateStatus(m, migrationv1alpha1.MigrationSucceeded, "")
+		if _, err := km.updateStatus(ctx, m, migrationv1alpha1.MigrationSucceeded, ""); err != nil {
+			utilruntime.HandleError(err)
+		}
 		metrics.Metrics.ObserveSucceededMigration(resource(m).String())
+		klog.V(2).Infof("%v: migration succeeded", m.Name)
 		return err
 	}
-	_, err = km.updateStatus(m, migrationv1alpha1.MigrationFailed, err.Error())
+	klog.Errorf("%v: migration failed: %v", m.Name, err)
+	if _, err := km.updateStatus(ctx, m, migrationv1alpha1.MigrationFailed, err.Error()); err != nil {
+		utilruntime.HandleError(err)
+	}
 	metrics.Metrics.ObserveFailedMigration(resource(m).String())
 	return err
 }
@@ -132,7 +139,7 @@ func (km *KubeMigrator) processOne(obj interface{}) error {
 // apiserver, because it's a pity to start over the entire migration merely
 // because a status update failure.
 // updateStatus also removes other KNOWN conditions.
-func (km *KubeMigrator) updateStatus(m *migrationv1alpha1.StorageVersionMigration, condition migrationv1alpha1.MigrationConditionType, message string) (*migrationv1alpha1.StorageVersionMigration, error) {
+func (km *KubeMigrator) updateStatus(ctx context.Context, m *migrationv1alpha1.StorageVersionMigration, condition migrationv1alpha1.MigrationConditionType, message string) (*migrationv1alpha1.StorageVersionMigration, error) {
 	backoff := wait.Backoff{
 		Steps:    6,
 		Duration: 10 * time.Millisecond,
@@ -160,12 +167,12 @@ func (km *KubeMigrator) updateStatus(m *migrationv1alpha1.StorageVersionMigratio
 		newConditions = append(newConditions, newCondition)
 		m.Status.Conditions = newConditions
 
-		_, err := km.migrationClient.MigrationV1alpha1().StorageVersionMigrations().UpdateStatus(m)
+		_, err := km.migrationClient.MigrationV1alpha1().StorageVersionMigrations().UpdateStatus(ctx, m, metav1.UpdateOptions{})
 		if err == nil {
 			return true, nil
 		}
 		// Always refresh and retry, no matter what kind of error is returned by the apiserver.
-		updated, err := km.migrationClient.MigrationV1alpha1().StorageVersionMigrations().Get(m.Name, metav1.GetOptions{})
+		updated, err := km.migrationClient.MigrationV1alpha1().StorageVersionMigrations().Get(ctx, m.Name, metav1.GetOptions{})
 		if err == nil {
 			m = updated
 		}

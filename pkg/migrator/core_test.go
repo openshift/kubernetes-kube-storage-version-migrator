@@ -17,11 +17,11 @@ limitations under the License.
 package migrator
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"testing"
 
-	"github.com/kubernetes-sigs/kube-storage-version-migrator/pkg/migrator/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 	ptype "github.com/prometheus/client_model/go"
 	v1 "k8s.io/api/core/v1"
@@ -33,6 +33,7 @@ import (
 	"k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/scheme"
 	clitesting "k8s.io/client-go/testing"
+	"sigs.k8s.io/kube-storage-version-migrator/pkg/migrator/metrics"
 )
 
 func newPod(name, namespace string) v1.Pod {
@@ -124,10 +125,9 @@ func TestMigrateList(t *testing.T) {
 			if pod51FirstTry {
 				pod51FirstTry = false
 				return true, nil, errors.NewTimeoutError("retriable error", 1)
-			} else {
-				pod51Retried = true
-				return true, nil, nil
 			}
+			pod51Retried = true
+			return true, nil, nil
 		}
 
 		// TODO: enable this injection when
@@ -243,11 +243,11 @@ func TestMigrateListClusterScoped(t *testing.T) {
 
 type fakeProgress struct{}
 
-func (f *fakeProgress) load() (string, error) {
+func (f *fakeProgress) load(ctx context.Context) (string, error) {
 	return "", nil
 }
 
-func (f *fakeProgress) save(string) error {
+func (f *fakeProgress) save(context.Context, string) error {
 	return nil
 }
 
@@ -257,7 +257,8 @@ func TestMetrics(t *testing.T) {
 	nodeList := newNodeList(100)
 	client := fake.NewSimpleDynamicClient(scheme.Scheme, toUnstructuredListOrDie(nodeList))
 	migrator := NewMigrator(v1.SchemeGroupVersion.WithResource("nodes"), client, &fakeProgress{})
-	migrator.Run()
+	ctx := context.TODO()
+	migrator.Run(ctx)
 	expectCounterCount(t,
 		"storage_migrator_core_migrator_migrated_objects",
 		map[string]string{

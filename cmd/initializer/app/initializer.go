@@ -1,16 +1,18 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"os"
 
-	migrationclient "github.com/kubernetes-sigs/kube-storage-version-migrator/pkg/clients/clientset"
-	"github.com/kubernetes-sigs/kube-storage-version-migrator/pkg/initializer"
 	"github.com/spf13/cobra"
 	crdclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	apiserviceclient "k8s.io/kube-aggregator/pkg/client/clientset_generated/clientset"
+	migrationclient "sigs.k8s.io/kube-storage-version-migrator/pkg/clients/clientset"
+	"sigs.k8s.io/kube-storage-version-migrator/pkg/initializer"
+	"sigs.k8s.io/kube-storage-version-migrator/pkg/version"
 )
 
 const (
@@ -22,7 +24,7 @@ func NewInitializerCommand() *cobra.Command {
 		Use:  "kube-storage-migrator-initializer",
 		Long: `The Kubernetes storage migrator initializer is a job that discovers resources that need migration and creates storageVersionMigration objects for such resources.`,
 		Run: func(cmd *cobra.Command, args []string) {
-			if err := Run(); err != nil {
+			if err := Run(context.TODO()); err != nil {
 				fmt.Fprintf(os.Stderr, "%v\n", err)
 				os.Exit(1)
 			}
@@ -30,13 +32,14 @@ func NewInitializerCommand() *cobra.Command {
 	}
 }
 
-func Run() error {
+func Run(ctx context.Context) error {
 	// creates the in-cluster config
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		return err
 	}
-	clientset, err := kubernetes.NewForConfig(rest.AddUserAgent(config, initializerUserAgent))
+	config.UserAgent = initializerUserAgent + "/" + version.VERSION
+	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		return err
 	}
@@ -59,5 +62,5 @@ func Run() error {
 		clientset.CoreV1().Namespaces(),
 		migration.MigrationV1alpha1(),
 	)
-	return init.Initialize()
+	return init.Initialize(ctx)
 }

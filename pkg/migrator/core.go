@@ -17,12 +17,12 @@ limitations under the License.
 package migrator
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"sync"
 	"time"
 
-	"github.com/kubernetes-sigs/kube-storage-version-migrator/pkg/migrator/metrics"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,6 +31,9 @@ import (
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/klog"
+
+	"sigs.k8s.io/kube-storage-version-migrator/pkg/migrator/metrics"
 )
 
 var metadataAccessor = meta.NewAccessor()
@@ -57,44 +60,51 @@ func NewMigrator(resource schema.GroupVersionResource, client dynamic.Interface,
 	}
 }
 
-func (m *migrator) get(namespace, name string) (*unstructured.Unstructured, error) {
+func (m *migrator) get(ctx context.Context, namespace, name string) (*unstructured.Unstructured, error) {
 	// if namespace is empty, .Namespace(namespace) is ineffective.
 	return m.client.
 		Resource(m.resource).
 		Namespace(namespace).
-		Get(name, metav1.GetOptions{})
+		Get(ctx, name, metav1.GetOptions{})
 }
 
-func (m *migrator) put(namespace, name string, obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+func (m *migrator) put(ctx context.Context, namespace string, obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {
 	// if namespace is empty, .Namespace(namespace) is ineffective.
 	return m.client.
 		Resource(m.resource).
 		Namespace(namespace).
-		Update(obj, metav1.UpdateOptions{})
+		Update(ctx, obj, metav1.UpdateOptions{})
 }
 
-func (m *migrator) list(options metav1.ListOptions) (*unstructured.UnstructuredList, error) {
+func (m *migrator) list(ctx context.Context, options metav1.ListOptions) (*unstructured.UnstructuredList, error) {
 	return m.client.
 		Resource(m.resource).
 		Namespace(metav1.NamespaceAll).
-		List(options)
+		List(ctx, options)
 }
 
 // Run migrates all the instances of the resource type managed by the migrator.
-func (m *migrator) Run() error {
-	continueToken, err := m.progress.load()
+func (m *migrator) Run(ctx context.Context) error {
+	continueToken, err := m.progress.load(ctx)
 	if err != nil {
 		return err
 	}
 	for {
-		list, listError := m.list(
+		list, listError := m.list(ctx,
 			metav1.ListOptions{
 				Limit:    defaultChunkLimit,
 				Continue: continueToken,
 			},
 		)
+		if errors.IsNotFound(listError) {
+			// Fail this migration, we don't want to get stuck on a migration for a resource that does not exist.
+			return fmt.Errorf("failed to list resources: %v", listError)
+		}
 		if listError != nil && !errors.IsResourceExpired(listError) {
 			if canRetry(listError) {
+				if seconds, delay := errors.SuggestsClientDelay(listError); delay {
+					time.Sleep(time.Duration(seconds) * time.Second)
+				}
 				continue
 			}
 			return listError
@@ -105,7 +115,7 @@ func (m *migrator) Run() error {
 				return err
 			}
 			continueToken = token
-			err = m.progress.save(continueToken)
+			err = m.progress.save(ctx, continueToken)
 			if err != nil {
 				utilruntime.HandleError(err)
 			}
@@ -124,7 +134,7 @@ func (m *migrator) Run() error {
 			return nil
 		}
 		continueToken = token
-		err = m.progress.save(continueToken)
+		err = m.progress.save(ctx, continueToken)
 		if err != nil {
 			utilruntime.HandleError(err)
 		}
@@ -132,15 +142,16 @@ func (m *migrator) Run() error {
 }
 
 func (m *migrator) migrateList(l *unstructured.UnstructuredList) error {
-	stop := make(chan struct{})
-	defer close(stop)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	workc := make(chan *unstructured.Unstructured)
 	go func() {
 		defer close(workc)
 		for i := range l.Items {
 			select {
 			case workc <- &l.Items[i]:
-			case <-stop:
+			case <-ctx.Done():
 				return
 			}
 		}
@@ -152,7 +163,7 @@ func (m *migrator) migrateList(l *unstructured.UnstructuredList) error {
 	for i := 0; i < m.concurrency; i++ {
 		go func() {
 			defer wg.Done()
-			m.worker(stop, workc, errc)
+			m.worker(ctx, workc, errc)
 		}()
 	}
 
@@ -168,21 +179,21 @@ func (m *migrator) migrateList(l *unstructured.UnstructuredList) error {
 	return utilerrors.NewAggregate(errors)
 }
 
-func (m *migrator) worker(stop <-chan struct{}, workc <-chan *unstructured.Unstructured, errc chan<- error) {
+func (m *migrator) worker(ctx context.Context, workc <-chan *unstructured.Unstructured, errc chan<- error) {
 	for item := range workc {
-		err := m.migrateOneItem(item)
+		err := m.migrateOneItem(ctx, item)
 		if err != nil {
 			select {
 			case errc <- err:
 				continue
-			case <-stop:
+			case <-ctx.Done():
 				return
 			}
 		}
 	}
 }
 
-func (m *migrator) migrateOneItem(item *unstructured.Unstructured) error {
+func (m *migrator) migrateOneItem(ctx context.Context, item *unstructured.Unstructured) error {
 	namespace, err := metadataAccessor.Namespace(item)
 	if err != nil {
 		return err
@@ -193,13 +204,23 @@ func (m *migrator) migrateOneItem(item *unstructured.Unstructured) error {
 	}
 	getBeforePut := false
 	for {
-		getBeforePut, err = m.try(namespace, name, item, getBeforePut)
+		getBeforePut, err = m.try(ctx, namespace, name, item, getBeforePut)
 		if err == nil || errors.IsNotFound(err) {
 			return nil
 		}
 		if canRetry(err) {
-			if seconds, delay := errors.SuggestsClientDelay(err); delay {
+			seconds, delay := errors.SuggestsClientDelay(err)
+			switch {
+			case delay && len(namespace) > 0:
+				klog.Warningf("migration of %s, in the %s namespace, will be retried after a %ds delay: %v", name, namespace, seconds, err)
 				time.Sleep(time.Duration(seconds) * time.Second)
+			case delay:
+				klog.Warningf("migration of %s will be retried after a %ds delay: %v", name, seconds, err)
+				time.Sleep(time.Duration(seconds) * time.Second)
+			case !delay && len(namespace) > 0:
+				klog.Warningf("migration of %s, in the %s namespace, will be retried: %v", name, namespace, err)
+			default:
+				klog.Warningf("migration of %s will be retried: %v", name, err)
 			}
 			continue
 		}
@@ -211,15 +232,15 @@ func (m *migrator) migrateOneItem(item *unstructured.Unstructured) error {
 // try tries to migrate the single object by PUT. It refreshes the object via
 // GET if "get" is true. If the PUT fails due to conflicts, or the GET fails,
 // the function requests the next try to GET the new object.
-func (m *migrator) try(namespace, name string, item *unstructured.Unstructured, get bool) (bool, error) {
+func (m *migrator) try(ctx context.Context, namespace, name string, item *unstructured.Unstructured, get bool) (bool, error) {
 	var err error
 	if get {
-		item, err = m.get(namespace, name)
+		item, err = m.get(ctx, namespace, name)
 		if err != nil {
 			return true, err
 		}
 	}
-	_, err = m.put(namespace, name, item)
+	_, err = m.put(ctx, namespace, item)
 	if err == nil {
 		return false, nil
 	}
