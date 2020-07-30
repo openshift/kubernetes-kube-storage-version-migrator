@@ -21,3 +21,5 @@ require (
 	k8s.io/kube-aggregator v0.18.0-beta.2
 	sigs.k8s.io/controller-tools v0.2.8
 )
+
+replace golang.org/x/text => golang.org/x/text v0.3.3
