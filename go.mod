@@ -3,8 +3,6 @@ module sigs.k8s.io/kube-storage-version-migrator
 go 1.13
 
 require (
-	github.com/google/go-cmp v0.3.1 // indirect
-	github.com/googleapis/gnostic v0.2.0 // indirect
 	github.com/imdario/mergo v0.3.7 // indirect
 	github.com/onsi/ginkgo v1.11.0
 	github.com/openshift/build-machinery-go v0.0.0-20200713135615-1f43d26dccc7
