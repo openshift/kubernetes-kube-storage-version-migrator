@@ -1,6 +1,6 @@
 module github.com/kubernetes-sigs/kube-storage-version-migrator
 
-go 1.12
+go 1.13
 
 require (
 	github.com/golang/groupcache v0.0.0-20191002201903-404acd9df4cc // indirect
