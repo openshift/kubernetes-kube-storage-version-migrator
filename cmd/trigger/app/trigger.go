@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -9,7 +10,6 @@ import (
 	migrationclient "github.com/kubernetes-sigs/kube-storage-version-migrator/pkg/clients/clientset"
 	"github.com/kubernetes-sigs/kube-storage-version-migrator/pkg/trigger"
 	"github.com/spf13/cobra"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
@@ -30,7 +30,7 @@ func NewTriggerCommand() *cobra.Command {
 		It also records the status of the storage via the storageState
 		API.`,
 		Run: func(cmd *cobra.Command, args []string) {
-			if err := Run(wait.NeverStop); err != nil {
+			if err := Run(context.TODO()); err != nil {
 				fmt.Fprintf(os.Stderr, "%v\n", err)
 				os.Exit(1)
 			}
@@ -38,7 +38,7 @@ func NewTriggerCommand() *cobra.Command {
 	}
 }
 
-func Run(stopCh <-chan struct{}) error {
+func Run(ctx context.Context) error {
 	var err error
 	var config *rest.Config
 	if *kubeconfigPath != "" {
@@ -57,6 +57,6 @@ func Run(stopCh <-chan struct{}) error {
 		return err
 	}
 	c := trigger.NewMigrationTrigger(migration)
-	c.Run(stopCh)
+	c.Run(ctx)
 	panic("unreachable")
 }

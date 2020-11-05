@@ -1,4 +1,4 @@
-FROM openshift/golang-builder:1.12 AS builder
+FROM openshift/golang-builder:1.13 AS builder
 WORKDIR /go/src/github.com/kubernetes-sigs/kube-storage-version-migrator
 COPY . .
 RUN make build
