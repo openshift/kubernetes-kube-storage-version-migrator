@@ -5,7 +5,7 @@ go 1.13
 require (
 	github.com/imdario/mergo v0.3.7 // indirect
 	github.com/onsi/ginkgo v1.11.0
-	github.com/openshift/build-machinery-go v0.0.0-20200713135615-1f43d26dccc7
+	github.com/openshift/build-machinery-go v0.0.0-20210413112106-60cf6ea633f9
 	github.com/prometheus/client_golang v1.7.1
 	github.com/prometheus/client_model v0.2.0
 	github.com/spf13/cobra v1.0.0
