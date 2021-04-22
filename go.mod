@@ -1,6 +1,6 @@
 module sigs.k8s.io/kube-storage-version-migrator
 
-go 1.13
+go 1.16
 
 require (
 	github.com/imdario/mergo v0.3.7 // indirect
