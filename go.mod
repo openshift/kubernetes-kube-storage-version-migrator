@@ -1,6 +1,6 @@
 module sigs.k8s.io/kube-storage-version-migrator
 
-go 1.19
+go 1.20
 
 require (
 	github.com/onsi/ginkgo v1.11.0
