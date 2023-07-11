@@ -1,7 +1,7 @@
 all: build
 .PHONY: all
 
-GO_BUILD_PACKAGES :=./cmd/migrator
+GO_BUILD_PACKAGES :=./cmd/migrator ./cmd/trigger
 GO_TEST_PACKAGES :=./pkg/...
 
 include $(addprefix ./vendor/github.com/openshift/build-machinery-go/make/, \

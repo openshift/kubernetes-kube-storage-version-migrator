@@ -5,3 +5,4 @@ RUN make build
 
 FROM registry.ci.openshift.org/ocp/4.14:base
 COPY --from=builder /go/src/github.com/kubernetes-sigs/kube-storage-version-migrator/migrator /usr/bin/
+COPY --from=builder /go/src/github.com/kubernetes-sigs/kube-storage-version-migrator/trigger /usr/bin/
