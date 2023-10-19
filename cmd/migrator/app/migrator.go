@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log"
 	"net/http"
@@ -41,12 +42,20 @@ func NewMigratorCommand() *cobra.Command {
 }
 
 func Run(ctx context.Context) error {
-	http.Handle("/metrics", promhttp.Handler())
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
 	livenessHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "ok")
 	})
-	http.HandleFunc("/healthz", livenessHandler)
-	go func() { http.ListenAndServe(":2112", nil) }()
+	mux.HandleFunc("/healthz", livenessHandler)
+
+	metricsserver := &http.Server{
+		Addr:    ":2112",
+		Handler: mux,
+		// Disable HTTP/2
+		TLSNextProto: map[string]func(*http.Server, *tls.Conn, http.Handler){},
+	}
+	go func() { metricsserver.ListenAndServe() }()
 
 	var err error
 	var config *rest.Config
