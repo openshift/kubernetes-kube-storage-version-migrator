@@ -6,13 +6,22 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
 	flag "github.com/spf13/pflag"
+
+	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/leaderelection"
+	"k8s.io/client-go/tools/leaderelection/resourcelock"
+	"k8s.io/klog/v2"
 	migrationclient "sigs.k8s.io/kube-storage-version-migrator/pkg/clients/clientset"
 	"sigs.k8s.io/kube-storage-version-migrator/pkg/controller"
 )
@@ -22,9 +31,12 @@ const (
 )
 
 var (
-	kubeconfigPath = flag.String("kubeconfig", "", "absolute path to the kubeconfig file specifying the apiserver instance. If unspecified, fallback to in-cluster configuration")
-	kubeAPIQPS     = flag.Float32("kube-api-qps", 40.0, "QPS to use while talking with kubernetes apiserver.")
-	kubeAPIBurst   = flag.Int("kube-api-burst", 1000, "Burst to use while talking with kubernetes apiserver.")
+	kubeconfigPath     = flag.String("kubeconfig", "", "absolute path to the kubeconfig file specifying the apiserver instance. If unspecified, fallback to in-cluster configuration")
+	kubeAPIQPS         = flag.Float32("kube-api-qps", 40.0, "QPS to use while talking with kubernetes apiserver.")
+	kubeAPIBurst       = flag.Int("kube-api-burst", 1000, "Burst to use while talking with kubernetes apiserver.")
+	leaseHolderId      = flag.String("lease-holder-id", "", "lease lock holder identity name")
+	leaseLockName      = flag.String("lease-lock-name", "storage-version-migration-migrator-lock", "the lease lock resource name")
+	leaseLockNamespace = flag.String("lease-lock-namespace", "", "the lease lock resource namespace")
 )
 
 func NewMigratorCommand() *cobra.Command {
@@ -32,8 +44,13 @@ func NewMigratorCommand() *cobra.Command {
 		Use:  "kube-storage-migrator",
 		Long: `The Kubernetes storage migrator migrates resources based on the StorageVersionMigrations APIs.`,
 		Run: func(cmd *cobra.Command, args []string) {
-			if err := Run(context.TODO()); err != nil {
+
+			ctx, done := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer done()
+
+			if err := Run(ctx); err != nil {
 				fmt.Fprintf(os.Stderr, "%v\n", err)
+				done()
 				os.Exit(1)
 			}
 		},
@@ -63,7 +80,7 @@ func Run(ctx context.Context) error {
 	}
 	config.QPS = *kubeAPIQPS
 	config.Burst = *kubeAPIBurst
-	dynamic, err := dynamic.NewForConfig(rest.AddUserAgent(config, migratorUserAgent))
+	client, err := dynamic.NewForConfig(rest.AddUserAgent(config, migratorUserAgent))
 	if err != nil {
 		return err
 	}
@@ -72,9 +89,69 @@ func Run(ctx context.Context) error {
 		return err
 	}
 	c := controller.NewKubeMigrator(
-		dynamic,
+		client,
 		migration,
 	)
-	c.Run(ctx)
+	lock, err := newResourceLock(config)
+	if err != nil {
+		return err
+	}
+	leaderElectionConfig := newLeaderElectionConfig(lock, config)
+	leaderElectionConfig.Callbacks.OnStartedLeading = func(ctx context.Context) { c.Run(ctx) }
+	leaderelection.RunOrDie(ctx, leaderElectionConfig)
 	panic("unreachable")
+}
+
+func newResourceLock(config *rest.Config) (resourcelock.Interface, error) {
+	if len(*leaseHolderId) == 0 {
+		var i string
+		if hostname, err := os.Hostname(); err != nil {
+			i = string(uuid.NewUUID())
+		} else {
+			i = hostname + "_" + string(uuid.NewUUID())
+		}
+		leaseHolderId = &i
+	}
+	if len(*leaseLockNamespace) == 0 {
+		var n string
+		data, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+		if err != nil {
+			n = "default"
+			klog.Warningf("Error reading service account namespace: %v", err)
+		}
+		if n = strings.TrimSpace(string(data)); len(n) == 0 {
+			n = "default"
+		}
+		leaseLockNamespace = &n
+	}
+	lock, err := resourcelock.NewFromKubeconfig(
+		resourcelock.LeasesResourceLock,
+		*leaseLockNamespace,
+		*leaseLockName,
+		resourcelock.ResourceLockConfig{
+			Identity:      *leaseHolderId,
+			EventRecorder: nil,
+		},
+		config,
+		107*time.Second,
+	)
+	return lock, err
+}
+
+func newLeaderElectionConfig(lock resourcelock.Interface, config *rest.Config) leaderelection.LeaderElectionConfig {
+	leaderElectionConfig := leaderelection.LeaderElectionConfig{
+		Lock:            lock,
+		LeaseDuration:   137 * time.Second,
+		RenewDeadline:   107 * time.Second,
+		RetryPeriod:     26 * time.Second,
+		ReleaseOnCancel: true,
+		Callbacks: leaderelection.LeaderCallbacks{
+			OnStoppedLeading: func() {
+				klog.Warningf("leader election lost")
+				os.Exit(0)
+			},
+		},
+		Name: *leaseLockName,
+	}
+	return leaderElectionConfig
 }
