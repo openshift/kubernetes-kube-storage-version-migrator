@@ -63,7 +63,12 @@ func Run(ctx context.Context) error {
 		fmt.Fprintf(w, "ok")
 	})
 	http.HandleFunc("/healthz", livenessHandler)
-	go func() { http.ListenAndServe(":2112", nil) }()
+	go func() {
+		if err := http.ListenAndServe(":2112", nil); err != nil {
+			klog.Fatal(err)
+		}
+		klog.Info("server exited")
+	}()
 
 	var err error
 	var config *rest.Config
