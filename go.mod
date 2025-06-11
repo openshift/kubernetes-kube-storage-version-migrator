@@ -4,7 +4,7 @@ go 1.22.0
 
 require (
 	github.com/onsi/ginkgo v1.16.5
-	github.com/openshift/build-machinery-go v0.0.0-20230306181456-d321ffa04533
+	github.com/openshift/build-machinery-go v0.0.0-20250602125535-1b6d00b8c37c
 	github.com/prometheus/client_golang v1.14.0
 	github.com/prometheus/client_model v0.3.0
 	github.com/spf13/cobra v1.7.0
