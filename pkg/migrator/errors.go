@@ -21,6 +21,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/net"
+	"k8s.io/klog/v2"
 )
 
 // ErrRetriable is a wrapper for an error that a migrator may use to indicate the
@@ -52,6 +53,18 @@ func isConnectionRefusedError(err error) bool {
 	return strings.Contains(err.Error(), "connection refused")
 }
 
+// isUIDPreconditionError checks whether the error contains "Precondition failed: UID in precondition".
+// This error message is typically present when the resource is deleted before it can be written back.
+func isUIDPreconditionError(err error) bool {
+	return strings.Contains(err.Error(), "Precondition failed: UID in precondition")
+}
+
+// isConflictError checks whether the given error is a conflict error.
+// This is true when errors.IsConflict or isUIDPreconditionError returns true.
+func isConflictError(err error) bool {
+	return errors.IsConflict(err) || isUIDPreconditionError(err)
+}
+
 // interpret adds retry information to the provided error. And it might change
 // the error to nil.
 func interpret(err error) error {
@@ -63,7 +76,7 @@ func interpret(err error) error {
 		return nil
 	case errors.IsMethodNotSupported(err):
 		return ErrNotRetriable{err}
-	case errors.IsConflict(err):
+	case isConflictError(err):
 		return ErrRetriable{err}
 	case errors.IsServerTimeout(err):
 		return ErrRetriable{err}
@@ -90,4 +103,13 @@ func canRetry(err error) bool {
 		return false
 	}
 	return true
+}
+
+func logLevelForTryError(err error) klog.Level {
+	switch {
+	case errors.IsNotFound(err), isConflictError(err):
+		return 2
+	default:
+		return 0
+	}
 }

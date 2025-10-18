@@ -209,19 +209,11 @@ func (m *migrator) migrateOneItem(ctx context.Context, item *unstructured.Unstru
 			return nil
 		}
 		if canRetry(err) {
-			seconds, delay := errors.SuggestsClientDelay(err)
-			switch {
-			case delay && len(namespace) > 0:
-				klog.Warningf("migration of %s, in the %s namespace, will be retried after a %ds delay: %v", name, namespace, seconds, err)
-				time.Sleep(time.Duration(seconds) * time.Second)
-			case delay:
-				klog.Warningf("migration of %s will be retried after a %ds delay: %v", name, seconds, err)
-				time.Sleep(time.Duration(seconds) * time.Second)
-			case !delay && len(namespace) > 0:
-				klog.Warningf("migration of %s, in the %s namespace, will be retried: %v", name, namespace, err)
-			default:
-				klog.Warningf("migration of %s will be retried: %v", name, err)
-			}
+			delaySeconds, _ := errors.SuggestsClientDelay(err)
+			delay := time.Duration(delaySeconds) * time.Second
+			klog.V(logLevelForTryError(err)).InfoS("Retrying migration",
+				"object", klog.KRef(namespace, name), "delay", delay, "err", err)
+			time.Sleep(delay)
 			continue
 		}
 		// error is not retriable
@@ -244,7 +236,7 @@ func (m *migrator) try(ctx context.Context, namespace, name string, item *unstru
 	if err == nil {
 		return false, nil
 	}
-	return errors.IsConflict(err), err
+	return isConflictError(err), err
 
 	// TODO: The oc admin uses a defer function to do bandwidth limiting
 	// after doing all operations. The rate limiter is marked as an alpha
