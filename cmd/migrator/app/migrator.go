@@ -6,10 +6,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
 	flag "github.com/spf13/pflag"
+
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -32,8 +35,12 @@ func NewMigratorCommand() *cobra.Command {
 		Use:  "kube-storage-migrator",
 		Long: `The Kubernetes storage migrator migrates resources based on the StorageVersionMigrations APIs.`,
 		Run: func(cmd *cobra.Command, args []string) {
-			if err := Run(context.TODO()); err != nil {
+			ctx, done := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer done() // give leader election a chance to release the lock
+
+			if err := Run(ctx); err != nil {
 				fmt.Fprintf(os.Stderr, "%v\n", err)
+				done() // os.Exit does not call deferred functions
 				os.Exit(1)
 			}
 		},
@@ -75,6 +82,9 @@ func Run(ctx context.Context) error {
 		dynamic,
 		migration,
 	)
+	if *leaderElectionEnabled {
+		return runWithLeaderElection(ctx, config, c)
+	}
 	c.Run(ctx)
-	panic("unreachable")
+	return nil // reachable if signal cancels ctx
 }
